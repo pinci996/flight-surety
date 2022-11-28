@@ -1,16 +1,32 @@
-pragma solidity ^0.4.25;
+pragma solidity ^0.4.24;
 
 import "../node_modules/openzeppelin-solidity/contracts/math/SafeMath.sol";
 
 contract FlightSuretyData {
     using SafeMath for uint256;
+    using SafeMath for uint8;
 
     /********************************************************************************************/
     /*                                       DATA VARIABLES                                     */
     /********************************************************************************************/
 
     address private contractOwner;                                      // Account used to deploy contract
-    bool private operational = true;                                    // Blocks all state changes throughout the contract if false
+    bool private operational = true; 
+    address private authorizedCaller;
+
+    struct Insurance {
+        uint256 paid;
+        uint256 insurancePayout;
+    }                                   // Blocks all state changes throughout the contract if false
+
+    mapping(address => bool) public registeredAirlines;
+    mapping(address => uint256) fundedAirlines;
+    mapping(bytes32 => address[]) passengers;
+    mapping(bytes32 => mapping(address => Insurance)) flights;
+
+    event InsurancePayoutPaid(address passenger, uint256 payment);
+
+    uint8 public airlineRegisteredCounter = 1;
 
     /********************************************************************************************/
     /*                                       EVENT DEFINITIONS                                  */
@@ -21,12 +37,9 @@ contract FlightSuretyData {
     * @dev Constructor
     *      The deploying account becomes contractOwner
     */
-    constructor
-                                (
-                                ) 
-                                public 
-    {
+    constructor(address firstAirline) public {
         contractOwner = msg.sender;
+        registeredAirlines[firstAirline] = true;
     }
 
     /********************************************************************************************/
@@ -56,6 +69,11 @@ contract FlightSuretyData {
         _;
     }
 
+    modifier requireAuthorizedCaller() {
+        require(msg.sender == authorizedCaller, "Caller is not an authorized caller");
+        _;
+    }
+
     /********************************************************************************************/
     /*                                       UTILITY FUNCTIONS                                  */
     /********************************************************************************************/
@@ -71,6 +89,19 @@ contract FlightSuretyData {
                             returns(bool) 
     {
         return operational;
+    }
+
+    function isPassengerInsured(address passenger, bytes32 flightKey) public view returns(bool) {
+        Insurance memory insured = flights[flightKey][passenger];
+        return insured.paid > 0;
+    }
+
+    function isAirlineRegistered(address airline) public view returns(bool) {
+        return registeredAirlines[airline];
+    }
+
+    function isAirlineFunded(address airline) public view returns(bool) {
+        return fundedAirlines[airline] > 0;
     }
 
 
@@ -89,6 +120,10 @@ contract FlightSuretyData {
         operational = mode;
     }
 
+    function setAuthorizedCaller(address appContract) requireContractOwner external {
+        authorizedCaller = appContract;
+    }
+
     /********************************************************************************************/
     /*                                     SMART CONTRACT FUNCTIONS                             */
     /********************************************************************************************/
@@ -98,12 +133,9 @@ contract FlightSuretyData {
     *      Can only be called from FlightSuretyApp contract
     *
     */   
-    function registerAirline
-                            (   
-                            )
-                            external
-                            pure
-    {
+    function registerAirline(address airline) external requireAuthorizedCaller requireIsOperational {
+        registeredAirlines[airline] = true;
+        airlineRegisteredCounter = uint8(airlineRegisteredCounter.add(1));
     }
 
 
@@ -111,24 +143,38 @@ contract FlightSuretyData {
     * @dev Buy insurance for a flight
     *
     */   
-    function buy
-                            (                             
-                            )
-                            external
-                            payable
-    {
+    function buy(address passenger, address airline, string flight, uint256 timestamp)
+        requireIsOperational 
+        requireAuthorizedCaller 
+        external payable 
+        {
 
+        bytes32 _key = getFlightKey(airline, flight, timestamp);
+        require(!isPassengerInsured(passenger, _key), 'Insurance already bought');
+
+        Insurance memory insured = Insurance({
+            paid: msg.value,
+            insurancePayout: 0
+        });
+
+        flights[_key][passenger] = insured;
+        passengers[_key].push(passenger);
     }
 
     /**
      *  @dev Credits payouts to insurees
     */
-    function creditInsurees
-                                (
-                                )
-                                external
-                                pure
-    {
+    function creditInsurees(address airline, string flight, uint256 timestamp, uint8 percentage)
+        requireAuthorizedCaller 
+        requireIsOperational 
+        external 
+        {
+
+        bytes32 _key = getFlightKey(airline, flight, timestamp);
+        for (uint256 i = 0; i < passengers[_key].length; i++) {
+            address passenger = passengers[_key][i];
+            flights[_key][passenger].insurancePayout = flights[_key][passenger].paid.mul(percentage).div(100);
+        }
     }
     
 
@@ -136,12 +182,20 @@ contract FlightSuretyData {
      *  @dev Transfers eligible payout funds to insuree
      *
     */
-    function pay
-                            (
-                            )
-                            external
-                            pure
-    {
+    function pay(address passenger, address airline, string flight, uint256 timestamp)
+        requireAuthorizedCaller 
+        requireIsOperational 
+        external 
+        {
+
+        bytes32 _key = getFlightKey(airline, flight, timestamp);
+        require(isPassengerInsured(passenger, _key), 'Passenger not insured.');
+        require(flights[_key][passenger].insurancePayout > 0, 'There is no payout for this passenger.');
+
+        uint256 payment = flights[_key][passenger].insurancePayout;
+        flights[_key][passenger].insurancePayout = 0;
+        address(uint160(passenger)).transfer(payment);
+        emit InsurancePayoutPaid(passenger, payment);
     }
 
    /**
@@ -149,12 +203,8 @@ contract FlightSuretyData {
     *      resulting in insurance payouts, the contract should be self-sustaining
     *
     */   
-    function fund
-                            (   
-                            )
-                            public
-                            payable
-    {
+    function fund(address airline) requireIsOperational requireAuthorizedCaller public payable {
+        fundedAirlines[airline] = msg.value;
     }
 
     function getFlightKey
@@ -170,17 +220,5 @@ contract FlightSuretyData {
         return keccak256(abi.encodePacked(airline, flight, timestamp));
     }
 
-    /**
-    * @dev Fallback function for funding smart contract.
-    *
-    */
-    function() 
-                            external 
-                            payable 
-    {
-        fund();
     }
-
-
-}
 
