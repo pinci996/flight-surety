@@ -8,7 +8,9 @@ export default class Contract {
         let config = Config[network];
         this.web3 = new Web3(new Web3.providers.HttpProvider(config.url));
         this.flightSuretyApp = new this.web3.eth.Contract(FlightSuretyApp.abi, config.appAddress);
+        this.flightSuretyData = new this.web3.eth.Contract(FlightSuretyData.abi, config.dataAddress);
         this.initialize(callback);
+        this.registerEvents(callback);
         this.owner = null;
         this.airlines = [];
         this.passengers = [];
@@ -28,6 +30,12 @@ export default class Contract {
             while(this.passengers.length < 5) {
                 this.passengers.push(accts[counter++]);
             }
+
+            this.flightSuretyData.methods
+                .setAuthorizedCaller(address)
+                .send({ from: this.owner }, (error, result) => {
+                    console.log(error);
+                });
 
             callback();
         });
@@ -51,6 +59,38 @@ export default class Contract {
             .fetchFlightStatus(payload.airline, payload.flight, payload.timestamp)
             .send({ from: self.owner}, (error, result) => {
                 callback(error, payload);
+            });
+    }
+
+    async registerEvents() {
+        await this.flightSuretyApp.events.OracleReport({ fromBlock: 'latest' })
+            .on('data', (e) => {
+                let event = new CustomEvent("OracleReportEvent", { "detail": e.returnValues.status })
+                document.dispatchEvent(event);
+            });
+
+        await this.flightSuretyApp.events.FlightStatusInfo({ fromBlock: 'latest' })
+            .on('data', (e) => {
+                let event = new CustomEvent("FlightStatusInfo", { "detail": e.returnValues.status })
+                document.dispatchEvent(event);
+            });
+    }
+
+    buyInsurance(flight, timestamp, value, callback) {
+        const self = this;
+        const payload = {
+            airline: self.airlines[0],
+            flight: flight,
+            timestamp: timestamp
+        }
+        self.flightSuretyApp.methods
+            .buy(payload.airline, payload.flight, payload.timestamp)
+            .send({
+                from: self.passengers[0],
+                value: this.web3.utils.toWei(value, 'Ether'),
+                gas: 300000
+            }, (error) => {
+                callback(error, payload)
             });
     }
 }
